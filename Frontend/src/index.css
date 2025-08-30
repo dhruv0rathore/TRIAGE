@@ -2,7 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Global minimalist styles: Clean, sans-serif, subtle shadows. */
+/* Global pro styles: Better fonts, subtle transitions. */
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  @apply antialiased;
+}
+
+input, textarea {
+  @apply transition duration-200;
 }
