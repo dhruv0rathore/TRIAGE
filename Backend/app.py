@@ -1,118 +1,106 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_cors import CORS
 import uuid
 import base64
 from google.generativeai import configure, GenerativeModel
 import os
+import json
+import time
 
-app = Flask(__name__)
-CORS(app)  # Enable CORS for frontend dev
+# --- CONFIGURATION ---
+app = Flask(__name__,
+            static_folder='static',
+            template_folder='templates')
+CORS(app)
 
-# In-memory queues: pending (unprocessed), queue (sorted processed)
+# --- IN-MEMORY DATABASE ---
 pending_patients = []
-processed_queue = []  # Sorted by priority descending
+processed_queue = []
 
-# Configure Gemini once, but key set per request (passed from frontend)
-def get_gemini_model(api_key):
-    configure(api_key=api_key)
-    return GenerativeModel('gemini-1.5-pro')  # Use Pro for multimodal
+# ==============================================================================
+# --- FRONTEND SERVING ROUTES ---
+# ==============================================================================
 
-# Route: Nurse submits patient data
-@app.route('/submit-patient', methods=['POST'])
+@app.route('/assets/<path:filename>')
+def serve_assets(filename):
+    return send_from_directory(os.path.join(app.static_folder, 'assets'), filename)
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_react_app(path):
+    return render_template("triage_app.html")
+
+# ==============================================================================
+# --- API ENDPOINTS ---
+# ==============================================================================
+
+@app.route('/api/submit-patient', methods=['POST'])
 def submit_patient():
     data = request.json
-    patient = {
-        'id': str(uuid.uuid4()),
-        'vitals': data['vitals'],
-        'symptoms': data['symptoms'],
-        'photo': data.get('photo')  # Base64 string or None
-    }
+    patient = { 'id': str(uuid.uuid4()), 'vitals': data.get('vitals', 'N/A'), 'symptoms': data.get('symptoms', 'N/A'), 'photo': data.get('photo') }
     pending_patients.append(patient)
     return jsonify({'success': True, 'id': patient['id']})
 
-# Route: Admin gets pending patients
-@app.route('/get-pending', methods=['GET'])
+@app.route('/api/get-pending', methods=['GET'])
 def get_pending():
     return jsonify(pending_patients)
 
-# Route: Admin processes patient with AI
-@app.route('/process-patient', methods=['POST'])
+@app.route('/api/process-patient', methods=['POST'])
 def process_patient():
-    data = request.json
-    patient_id = data['id']
-    api_key = data['api_key']  # Passed from frontend
-
-    # Find patient
-    patient = next((p for p in pending_patients if p['id'] == patient_id), None)
-    if not patient:
-        return jsonify({'error': 'Patient not found'}), 404
-
-    # Build Gemini prompt
-    prompt = f"Analyze symptoms: {patient['symptoms']}, vitals: {patient['vitals']}. Assign priority (1-10, 10=critical), suggested doctor (e.g., cardiologist), and generate short report."
-    content = [{'text': prompt}]
-
-    if patient['photo']:
-        # Add image if present
-        content.append({
-            'inline_data': {
-                'mime_type': 'image/jpeg',  # Assume JPEG; adjust if needed
-                'data': patient['photo'].split(',')[1]  # Strip base64 prefix
-            }
-        })
-
-    # Call Gemini
-    model = get_gemini_model(api_key)
-    response = model.generate_content(content)
-
-    # Parse response (assume structured text; parse simply)
-    text = response.text
-    priority = 5  # Default
-    doctor = 'General'
-    report = text
     try:
-        lines = text.split('\n')
-        priority = int(lines[0].split(':')[-1].strip()) if 'priority' in lines[0].lower() else priority
-        doctor = lines[1].split(':')[-1].strip() if 'doctor' in lines[1].lower() else doctor
-        report = '\n'.join(lines[2:])
-    except:
-        pass  # Fallback to raw
+        data = request.json
+        api_key = data.get('api_key')
+        patient_id = data.get('id')
+        
+        if not api_key:
+            return jsonify({'error': 'API Key is missing from request'}), 400
 
-    # Return for head nurse to confirm/override
-    return jsonify({
-        'priority': priority,
-        'doctor': doctor,
-        'report': report
-    })
+        patient = next((p for p in pending_patients if p['id'] == patient_id), None)
+        
+        if not patient:
+            return jsonify({'error': 'Patient not found'}), 404
 
-# Route: Admin finalizes patient (overrides, adds to queue, fakes alert if top)
-@app.route('/finalize-patient', methods=['POST'])
+        prompt = f"""Analyze patient data. Respond ONLY with a valid JSON object in the format: {{"priority": <1-10>, "doctor": "<specialist>", "report": "<summary>"}}. Data -> Vitals: {patient['vitals']}, Symptoms: {patient['symptoms']}"""
+        content = [{'text': prompt}]
+        if patient.get('photo'):
+            content.append({'inline_data': {'mime_type': 'image/jpeg', 'data': patient['photo'].split(',')[1]}})
+
+        configure(api_key=api_key)
+        # --- THE UPGRADE: SWITCHING TO THE FASTER MODEL ---
+        model = GenerativeModel('gemini-2.5-flash-preview-05-20')
+        
+        response = model.generate_content(content)
+        
+        cleaned_text = response.text.replace('```json', '').replace('```', '').strip()
+        ai_result = json.loads(cleaned_text)
+        
+        return jsonify(ai_result)
+
+    except Exception as e:
+        # Provide a more detailed error back to the frontend for debugging
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f"An internal error occurred in the AI processor: {str(e)}"}), 500
+
+@app.route('/api/finalize-patient', methods=['POST'])
 def finalize_patient():
     data = request.json
-    patient_id = data['id']
-    priority = data['priority']
-    doctor = data['doctor']
-    report = data['report']
-
-    # Move from pending to processed
+    patient_id = data.get('id')
     patient = next((p for p in pending_patients if p['id'] == patient_id), None)
     if patient:
         pending_patients.remove(patient)
-        patient.update({'priority': priority, 'doctor': doctor, 'report': report})
+        patient.update({'priority': data.get('priority', 1), 'doctor': data.get('doctor', 'General'), 'report': data.get('report', 'N/A')})
         processed_queue.append(patient)
-        # Sort queue descending by priority
-        processed_queue.sort(key=lambda p: p['priority'], reverse=True)
+        processed_queue.sort(key=lambda p: int(p['priority']), reverse=True)
+        alert_sent = processed_queue and processed_queue[0]['id'] == patient_id
+        return jsonify({'success': True, 'alert_sent': alert_sent, 'queue': processed_queue})
+    return jsonify({'error': 'Patient not found'}), 404
 
-    # Fake alert if this is now top (next patient)
-    alert_sent = False
-    if processed_queue and processed_queue[0]['id'] == patient_id:
-        alert_sent = True  # In real: send email/Twilio
-
-    return jsonify({'success': True, 'alert_sent': alert_sent, 'queue': processed_queue})
-
-# Route: Get current queue
-@app.route('/get-queue', methods=['GET'])
+@app.route('/api/get-queue', methods=['GET'])
 def get_queue():
     return jsonify(processed_queue)
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # Run with debug=False for the final demo video for max stability
+    app.run(host='0.0.0.0', port=5000, debug=False)
+
