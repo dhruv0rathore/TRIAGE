@@ -1,4 +1,4 @@
-Cortex AI Triage System
+Triage
 A Hackathon-Built, Gemini-Powered Solution to Revolutionize Hospital Emergency Room Queues
 The Problem: The Chaos of "First-Come, First-Served"
 In hospital emergency rooms, every second matters. Yet, the standard operating procedure is often a linear queue where patients are seen in the order they arrive. This broken system forces patients with life-threatening conditions like chest pain to wait behind those with minor ailments, leading to dangerous delays, increased patient anxiety, and inefficient use of critical hospital resources. Manual triage, while essential, is often slow, inconsistent, and completely dependent on available staff.
